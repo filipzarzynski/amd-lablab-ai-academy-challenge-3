@@ -1,115 +1,77 @@
 #!/usr/bin/env python3
-"""Reference submission skeleton for AMD Mini-Challenge 3 (RAG).
+"""Submission entrypoint for AMD Mini-Challenge 3 (RAG).
 
-Unlike MC-2, the harness invokes this script in TWO different ways, inside your
-already-running container.
-
-1. ONCE, before any graded clock starts, to build whatever index you want:
-
-       python3 /app/app.py --index /app/corpus
-
-   This pass is ungraded and charged to your startup budget, not to a query.
-   It is where you should pay for parsing PDFs, spreadsheets and images.
-
-2. ONCE PER QUESTION, ten times:
-
-       python3 /app/app.py --corpus /app/corpus \\
-                           --query-id query_01 \\
-                           --query "What is the maximum junction temperature?"
-
-   and then it reads the file you wrote:
-
-       /app/output/query_01_output.json
-
-   The query id is GIVEN to you, not derived -- a question has no filename to
-   take a stem from. Write to exactly that id plus _output.json.
-
-The output is a JSON object with three keys:
-
-    {"answer": "94", "citations": ["specs/tq40_datasheet_r2.pdf"], "confidence": 0.9}
-
-  * answer     -- the VALUE only. "94", not "The maximum junction temperature
-                  is 94 C". Qualifiers that are part of the value stay:
-                  "Q3 FY27", not "Q3". Units and degree signs are normalised
-                  away for you, so 94, "94 C" and "94°C" are all accepted.
-  * citations  -- corpus-relative paths, compared as an EXACT SET. The test is
-                  necessity, not relevance: cite a file only if REMOVING it
-                  would make your answer impossible. Dumping your whole
-                  retrieval fails almost every question even when the answer is
-                  right. Some questions need two files; cite both.
-  * confidence -- recorded, never scored.
-
-Missing "answer" or missing "citations" is malformed and scores zero, on
-purpose: a crashed writer and a considered refusal must not look the same.
-
-If the corpus does not contain the answer, return an empty answer AND an empty
-citation list. "I don't know" is prose, and prose is graded as a wrong answer.
-Guessing is wrong, and so is answering from what the model already knows --
-the products in this corpus are fictional, so anything recalled rather than
-retrieved is wrong by construction.
-
-Three things that will cost you points no matter how good your model is:
-
-  * Loading the model inside answer(). The harness starts a NEW PROCESS for
-    every question. A naive implementation loads ten times and blows the
-    budget. Persist your index in --index, and keep the model resident behind
-    a unix socket, or make loading cheap enough not to matter.
-  * Letting one bad file kill the walk. The corpus deliberately contains an
-    unreadable file, an encrypted PDF, an unknown binary type and an empty
-    directory. A walk that raises on the first unreadable file indexes nothing
-    after it -- and because walk order follows the directory listing, WHICH
-    files you lose depends on filename order. That is how a submission tests
-    clean locally and grades badly here.
-  * Running on the CPU. VRAM is sampled continuously and a run that never uses
-    the GPU is rejected, so place your model on the device explicitly rather
-    than letting it fall back.
-
-Replace index() and answer() below. Leave the plumbing alone.
+Acts as a thin client to the resident background daemon via /tmp/rag.sock.
+Falls back to direct in-process execution if running outside daemon mode.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
+import socket
+import sys
 
 OUTPUT_DIR = Path(os.environ.get("MC2_OUTPUT_DIR", "/app/output"))
-INDEX_DIR = Path(os.environ.get("MC3_INDEX_DIR", "/app/index"))
+SOCKET_PATH = "/tmp/rag.sock"
+
+logger = logging.getLogger(__name__)
+
+
+def send_daemon_request(payload: dict) -> dict | None:
+    """Send request to the resident daemon over Unix socket."""
+    if not os.path.exists(SOCKET_PATH):
+        return None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(25.0)
+        sock.connect(SOCKET_PATH)
+        sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in chunk:
+                break
+        sock.close()
+        return json.loads(data.decode("utf-8").strip())
+    except Exception as e:
+        logger.warning("Daemon request failed: %s", e)
+        return None
 
 
 def index(corpus: Path) -> None:
-    """Build and PERSIST whatever you need to answer questions later.
+    """Build and persist whatever is needed to answer questions."""
+    resp = send_daemon_request({"cmd": "index", "corpus": str(corpus.resolve())})
+    if resp is not None:
+        return
 
-    Called once, before any question, with the corpus root. Anything you write
-    under INDEX_DIR survives into the per-question invocations; anything you
-    keep only in memory does not, because each question is a new process.
-
-    The corpus is a directory tree of mixed types -- pdf, docx, xlsx, csv, txt,
-    log, py, png, jpg -- and EVERY type holds at least one graded answer, so
-    skipping a format silently costs you the questions that depend on it. Two
-    of the ten questions are answerable only by looking at an image.
-
-    Walk defensively: catch per-file, keep going, and record what you could not
-    read rather than aborting. See the third bullet in the module docstring.
-    """
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    # Your work goes here.
+    # Fallback to direct in-process server if daemon is not running
+    from server import RAGServer
+    server = RAGServer()
+    server.index_corpus(corpus)
 
 
 def answer(corpus: Path, query: str) -> tuple[str, list[str], float]:
-    """Return (answer, citations, confidence) for ONE question.
+    """Return (answer, citations, confidence) for ONE question."""
+    resp = send_daemon_request({
+        "cmd": "query",
+        "corpus": str(corpus.resolve()),
+        "query": query,
+    })
+    if resp is not None and "answer" in resp and "citations" in resp:
+        return resp["answer"], resp["citations"], float(resp.get("confidence", 0.9))
 
-    THIS is what you replace. `citations` are paths relative to `corpus`, using
-    forward slashes -- "specs/tq40_datasheet_r2.pdf", not an absolute path and
-    not a bare filename.
-
-    Return ("", [], 0.0) to refuse. Refusing correctly scores full marks on the
-    question that has no answer in the corpus, and refusing on a question that
-    does have one scores the same as a wrong guess -- so refusal is safe to use
-    honestly and useless to use defensively.
-    """
-    return "", [], 0.0
+    # Fallback to direct in-process server
+    from server import RAGServer
+    server = RAGServer()
+    resp = server.answer_query(query, corpus)
+    return resp["answer"], resp["citations"], float(resp.get("confidence", 0.9))
 
 
 def main() -> int:
@@ -131,8 +93,7 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out = OUTPUT_DIR / (args.query_id + "_output.json")
-    # Written whole rather than streamed: a partially-written file that the
-    # harness reads mid-flush parses as invalid JSON and scores the query zero.
+    # Written whole to avoid partial-read parse errors by the harness
     out.write_text(
         json.dumps(
             {"answer": text, "citations": list(citations), "confidence": confidence},
