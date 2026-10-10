@@ -1,0 +1,62 @@
+[
+  {
+    "n": 1,
+    "file": "01_us_plate_california_clean.png",
+    "expected_text": "7ABC123",
+    "type": "us_plate"
+  },
+  {
+    "n": 2,
+    "file": "02_chinese_plate_beijing_clean.png",
+    "expected_text": "京A·12345",
+    "type": "chinese_plate"
+  },
+  {
+    "n": 3,
+    "file": "03_us_plate_new_york_angled.jpg",
+    "expected_text": "JHT 2951",
+    "type": "us_plate"
+  },
+  {
+    "n": 4,
+    "file": "04_us_plate_motion_blur.png",
+    "expected_text": "5XYZ891",
+    "type": "us_plate"
+  },
+  {
+    "n": 5,
+    "file": "05_chinese_plate_shanghai_glare.jpg",
+    "expected_text": "沪B·88888",
+    "type": "chinese_plate"
+  },
+  {
+    "n": 6,
+    "file": "06_stop_sign_clean.png",
+    "expected_text": "STOP",
+    "type": "sign"
+  },
+  {
+    "n": 7,
+    "file": "07_stop_sign_sensor_noise.tiff",
+    "expected_text": "STOP",
+    "type": "sign"
+  },
+  {
+    "n": 8,
+    "file": "08_speed_limit_sign.jpg",
+    "expected_text": "SPEED LIMIT 65",
+    "type": "sign"
+  },
+  {
+    "n": 9,
+    "file": "09_work_zone_sign_multiline.png",
+    "expected_text": "ROAD WORK AHEAD",
+    "type": "sign"
+  },
+  {
+    "n": 10,
+    "file": "10_advisory_speed_plaque.tiff",
+    "expected_text": "35",
+    "type": "sign"
+  }
+]
